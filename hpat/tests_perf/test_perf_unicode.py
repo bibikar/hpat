@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-import unittest
+import codecs
+import functools
+import itertools
+import sys
+import timeit
 
 from numba import njit, types
 
@@ -13,79 +17,124 @@ STRING_CASES = [
     '大处着眼，小处着手。',
 ]
 
+# We want to be able to print lines containing Unicode
+utf8writer = codecs.getwriter('utf-8')(sys.stdout.buffer,
+                                       errors='backslashreplace')
+print = functools.partial(print, file=utf8writer)
 
-def center_usecase(x, y):
+
+def time_func(f, inner_loops=100, outer_loops=5, warmup=True,
+              args=(), kwargs={}):
+    '''Time execution of a function.
+
+    The mean time taken to execute f(*args, **kwargs) over inner_loops
+    iterations is measured outer_loops times.
+
+    Parameters
+    ----------
+    f : callable f(*args, **kwargs)
+        The function to time.
+    inner_loops : int, default 100
+        Number of inner loop iterations to take the mean over.
+    outer_loops : int, default 5
+        Number of outer loop iterations.
+    warmup : bool, default True
+        Whether to include an extra warm up round before timing.
+    args : tuple, default ()
+        Positional arguments to pass to f.
+    kwargs : dict, default {}
+        Keyword arguments to pass to f.
+
+    Returns
+    -------
+    val
+        The last value returned from f
+    times : list
+        The mean times
+    '''
+
+    # Warm-up iteration
+    val = f(*args, **kwargs)
+    times = []
+
+    for _ in range(outer_loops):
+        t0 = timeit.default_timer()
+        for _ in range(inner_loops):
+            val = f(*args, **kwargs)
+        t1 = timeit.default_timer()
+
+        times.append((t1 - t0) / inner_loops)
+
+    return val, times
+
+
+def benchmark(*args, **kwargs):
+    def _benchmark(pyfunc):
+        def __benchmark():
+
+            # Time compilation
+            cfunc, compile_times = time_func(njit, args=(pyfunc,))
+            # TODO: report times
+            print('compilation took %s seconds' % min(compile_times))
+
+            for elem in itertools.product(*args, *kwargs.values()):
+                # Construct arguments
+                nargs = elem[:len(args)]
+                nkwargs = dict(zip(kwargs.keys(), elem[len(args):]))
+
+                # Time execution of pyfunc and cfunc
+                pyval, py_times = time_func(pyfunc, args=nargs, kwargs=nkwargs)
+                cval, c_times = time_func(cfunc, args=nargs, kwargs=nkwargs)
+
+                # TODO: this is all for the assertion - better way to do this?
+                nkwargs_str = tuple('%s=%r' % it for it in nkwargs.items())
+                nargs_str = tuple(repr(x) for x in nargs)
+                call_str = '%s(%s)' % (pyfunc.__qualname__,
+                                       ', '.join(nargs_str + nkwargs_str))
+                assert pyval == cval, '%s -> %s but jitted %s -> %s' % \
+                                      (call_str, pyval, call_str, cval)
+
+                # TODO: report times
+                print('pyfunc %s took %s seconds' % (call_str, min(py_times)))
+                print('cfunc %s took %s seconds' % (call_str, min(c_times)))
+        return __benchmark
+    return _benchmark
+
+
+@benchmark(STRING_CASES, range(-3, 20))
+def time_center(x, y):
     return x.center(y)
 
 
-def center_usecase_fillchar(x, y, fillchar):
+@benchmark(STRING_CASES, range(-3, 20), [' ', '+', 'ú', '处'])
+def time_center_fillchar(x, y, fillchar):
     return x.center(y, fillchar)
 
 
-def ljust_usecase(x, y):
+@benchmark(STRING_CASES, range(-3, 20))
+def time_ljust(x, y):
     return x.ljust(y)
 
 
-def ljust_usecase_fillchar(x, y, fillchar):
+@benchmark(STRING_CASES, range(-3, 20), [' ', '+', 'ú', '处'])
+def time_ljust_fillchar(x, y, fillchar):
     return x.ljust(y, fillchar)
 
 
-def rjust_usecase(x, y):
+@benchmark(STRING_CASES, range(-3, 20))
+def time_rjust(x, y):
     return x.rjust(y)
 
 
-def rjust_usecase_fillchar(x, y, fillchar):
+@benchmark(STRING_CASES, range(-3, 20), [' ', '+', 'ú', '处'])
+def time_rjust_fillchar(x, y, fillchar):
     return x.rjust(y, fillchar)
 
 
-class TestUnicodeStrings(unittest.TestCase):
-    """
-    Test unicode strings operations
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self._test_iteration = 10
-
-    def test_justification(self):
-        for pyfunc, case_name in [(center_usecase, 'center'),
-                                  (ljust_usecase, 'ljust'),
-                                  (rjust_usecase, 'rjust')]:
-
-            # compilation time is also needs to be measured
-            cfunc = njit(pyfunc)
-
-            for iter in range(self._test_iteration):
-                for s in STRING_CASES:
-                    for width in range(-3, 20):
-                        # these function calls needs to be benchmarked
-                        pyfunc_result = pyfunc(s, width)
-                        cfunc_result = cfunc(s, width)
-
-                        self.assertEqual(pyfunc_result, cfunc_result,
-                                         "'%s'.%s(%d)?" % (s, case_name, width))
-
-    def test_justification_fillchar(self):
-        for pyfunc, case_name in [(center_usecase_fillchar, 'center'),
-                                  (ljust_usecase_fillchar, 'ljust'),
-                                  (rjust_usecase_fillchar, 'rjust')]:
-
-            # compilation time is also needs to be measured
-            cfunc = njit(pyfunc)
-
-            for iter in range(self._test_iteration):
-                # allowed fillchar cases
-                for fillchar in [' ', '+', 'ú', '处']:
-                    for s in STRING_CASES:
-                        for width in range(-3, 20):
-                            # these function calls needs to be benchmarked
-                            pyfunc_result = pyfunc(s, width, fillchar)
-                            cfunc_result = cfunc(s, width, fillchar)
-
-                            self.assertEqual(pyfunc_result, cfunc_result,
-                                             "'%s'.%s(%d, '%s')?" % (s, case_name, width, fillchar))
-
-
 if __name__ == "__main__":
-    unittest.main()
+    time_center()
+    time_center_fillchar()
+    time_ljust()
+    time_ljust_fillchar()
+    time_rjust()
+    time_rjust_fillchar()
